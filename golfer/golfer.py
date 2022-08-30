@@ -5,6 +5,8 @@ from ast import *
 from enum import IntEnum, auto
 import sys
 from contextlib import contextmanager, nullcontext
+import re
+from string import punctuation, digits
 
 
 compound_statements = (
@@ -120,8 +122,23 @@ class Golfer(NodeVisitor):
             self.maybe_newline()
             self.write(" " * self._indent + text)
 
-    def write(self, text):
+    def write(self, *texts):
         """Append a piece of text"""
+
+        if len(texts) >= 2:
+            for text in texts:
+                self.write(text)
+            return
+        assert len(texts) == 1
+        text, = texts
+
+        if self._source and self._source[-1] and text:
+            if text == " ":
+                if self._source[-1][-1] in punctuation + digits:
+                    return
+            elif text[0] in punctuation and self._source[-1] == " ":
+                self._source.pop()
+
         self._source.append(text)
 
     def buffer_writer(self, text):
@@ -187,6 +204,7 @@ class Golfer(NodeVisitor):
             return node
 
     def get_type_comment(self, node):
+        assert False
         comment = self._type_ignores.get(node.lineno) or node.type_comment
         if comment is not None:
             return f" # type: {comment}"
@@ -225,6 +243,49 @@ class Golfer(NodeVisitor):
                 self.write("1")  # it means pass
 
         self._can_omit_nl = False
+
+    def float_shortest_expression(self, x: float) -> str:
+        if x == float("inf"):
+            return INF_STR
+        elif x == float("nan"):
+            return f"({INF_STR}-{INF_STR})"
+
+        candidates = []
+        candidates.append(repr(x))
+
+        if x.is_integer():
+            candidates.append(repr(int(x)) + ".")
+        if x < 1:
+            candidates.append("." + repr(x)[2:])
+
+        for exponent in range(-1000, 1000):
+            try:
+                y = 10.0 ** exponent
+            except OverflowError:
+                continue
+
+            if y == 0:
+                continue
+
+            z = x / y
+            if z == float("inf"):
+                continue
+
+            if z.is_integer():
+                candidates.append(repr(int(z)) + "e" + repr(exponent))
+            else:
+                candidates.append(repr(z) + "e" + repr(exponent))
+
+        validity_candidates = []
+
+        for c in candidates:
+            try:
+                if ast.literal_eval(c) == x:
+                    validity_candidates.append(c)
+            except SyntaxError:
+                pass
+
+        return min(validity_candidates, key=len)
 
     def visit(self, node):
         """Outputs a source code string that, if converted back to an ast
@@ -277,7 +338,7 @@ class Golfer(NodeVisitor):
         self.write("." * node.level)
         if node.module:
             self.write(node.module)
-        self.write(" import ")
+        self.write(" ", "import", " ")
         self.interleave(lambda: self.write(","), self.traverse, node.names)
 
     def visit_Assign(self, node):
@@ -371,7 +432,7 @@ class Golfer(NodeVisitor):
         self.write(" ")
         self.traverse(node.exc)
         if node.cause:
-            self.write(" from ")
+            self.write(" ", "from", " ")
             self.traverse(node.cause)
 
     def visit_Try(self, node):
@@ -392,7 +453,7 @@ class Golfer(NodeVisitor):
             self.write(" ")
             self.traverse(node.type)
         if node.name:
-            self.write(" as ")
+            self.write(" ", "as", " ")
             self.write(node.name)
         self.traverse_body(node.body)
 
@@ -400,7 +461,7 @@ class Golfer(NodeVisitor):
         for deco in node.decorator_list:
             self.fill("@")
             self.traverse(deco)
-        self.fill("class " + node.name)
+        self.fill("class", " " + node.name)
         with self.delimit_if("(", ")", condition = node.bases or node.keywords):
             comma = False
             for e in node.bases:
@@ -443,7 +504,7 @@ class Golfer(NodeVisitor):
     def _for_helper(self, fill, node):
         self.fill(fill)
         self.traverse(node.target)
-        self.write(" in ")
+        self.write(" ", "in", " ")
         self.traverse(node.iter)
         self.traverse_body(node.body)
         if node.orelse:
@@ -451,7 +512,7 @@ class Golfer(NodeVisitor):
             self.traverse_body(node.orelse)
 
     def visit_If(self, node):
-        self.fill("if ")
+        self.fill("if", " ")
         self.traverse(node.test)
         self.traverse_body(node.body)
         # collapse nested ifs into equivalent elifs.
@@ -607,7 +668,9 @@ class Golfer(NodeVisitor):
         """
 
     def _write_constant(self, value):
-        if isinstance(value, (float, complex)):
+        if isinstance(value, float):
+            self.write(self.float_shortest_expression(value))
+        elif isinstance(value, (float, complex)):
             # Substitute overflowing decimal literal for AST infinities,
             # and inf - inf for NaNs.
             self.write(
@@ -664,25 +727,25 @@ class Golfer(NodeVisitor):
 
     def visit_comprehension(self, node):
         if node.is_async:
-            self.write(" async for ")
+            self.write(" ", "async for", " ")
         else:
-            self.write(" for ")
+            self.write(" ", "for", " ")
         self.set_precedence(Precedence.TUPLE, node.target)
         self.traverse(node.target)
-        self.write(" in ")
+        self.write(" ", "in", " ")
         self.set_precedence(Precedence.TEST.next(), node.iter, *node.ifs)
         self.traverse(node.iter)
         for if_clause in node.ifs:
-            self.write(" if ")
+            self.write(" ", "if", " ")
             self.traverse(if_clause)
 
     def visit_IfExp(self, node):
         with self.require_parens(Precedence.TEST, node):
             self.set_precedence(Precedence.TEST.next(), node.body, node.test)
             self.traverse(node.body)
-            self.write(" if ")
+            self.write(" ", "if", " ")
             self.traverse(node.test)
-            self.write(" else ")
+            self.write(" ", "else", " ")
             self.set_precedence(Precedence.TEST, node.orelse)
             self.traverse(node.orelse)
 
@@ -822,7 +885,9 @@ class Golfer(NodeVisitor):
                     d = ""
                 else:
                     d = " "
-                self.write(d + self.cmpops[o.__class__.__name__] + d)
+                self.write(d)
+                self.write(self.cmpops[o.__class__.__name__])
+                self.write(d)
                 self.traverse(e)
 
     boolops = {"And": "and", "Or": "or"}
@@ -839,8 +904,8 @@ class Golfer(NodeVisitor):
             self.traverse(node)
 
         with self.require_parens(operator_precedence, node):
-            s = f" {operator} "
-            self.interleave(lambda: self.write(s), increasing_level_traverse, node.values)
+            s = (" ", operator, " ")
+            self.interleave(lambda: self.write(*s), increasing_level_traverse, node.values)
 
     def visit_Attribute(self, node):
         self.set_precedence(Precedence.ATOM, node.value)
@@ -975,12 +1040,12 @@ class Golfer(NodeVisitor):
     def visit_alias(self, node):
         self.write(node.name)
         if node.asname:
-            self.write(" as " + node.asname)
+            self.write(" ", "as", " " + node.asname)
 
     def visit_withitem(self, node):
         self.traverse(node.context_expr)
         if node.optional_vars:
-            self.write(" as ")
+            self.write(" ", "as", " ")
             self.traverse(node.optional_vars)
 
 
