@@ -6,7 +6,10 @@ from enum import IntEnum, auto
 import sys
 from contextlib import contextmanager, nullcontext
 import re
-from string import punctuation, digits
+from string import digits, whitespace
+
+
+punctuation = r"""!"#$%&'()*+,-./:;<=>?@[\]^`{|}~"""
 
 
 compound_statements = (
@@ -104,45 +107,50 @@ class Golfer(NodeVisitor):
             traverser(items[0])
             self.write(",")
         else:
-            self.interleave(lambda: self.write(", "), traverser, items)
+            self.interleave(lambda: self.write(","), traverser, items)
 
     def maybe_newline(self):
         """Adds a newline if it isn't the start of generated source"""
         if self._source:
             self.write("\n")
 
-    def fill(self, text=""):
+    def fill(self, *texts):
         """Indent a piece of text and append it, according to the current
         indentation level"""
         if self._can_omit_nl:
             if self._source and self._source[-1][-1] != ":":
                 self.write(";")
-            self.write(text)
+            self.write(*texts)
         else:
             self.maybe_newline()
-            self.write(" " * self._indent + text)
+            self.write(" " * self._indent, *texts)
 
     def write(self, *texts):
         """Append a piece of text"""
 
-        if len(texts) >= 2:
-            for text in texts:
-                self.write(text)
-            return
-        assert len(texts) == 1
-        text, = texts
+        for text in texts:
+            self._write(text)
 
-        if self._source and self._source[-1] and text:
-            if text == " ":
-                if self._source[-1][-1] in punctuation + digits:
-                    return
-            elif text[0] in punctuation and self._source[-1] == " ":
-                self._source.pop()
+    def _write(self, text: str):
+        if len(text) == 0:
+            return
+
+        if text == " " and len(self._source) >= 1:
+            last = self._source[-1][-1]
+            if last in punctuation + digits:
+                return
+        elif text[0] in punctuation:
+            tail = "".join(self._source[-2:])
+            if len(tail) >= 2:
+                if tail[-1] == " " and tail[-2] not in whitespace:
+                    last = self._source.pop()
+                    if not last == " ":
+                        self._source.append(last[:-1])
 
         self._source.append(text)
 
-    def buffer_writer(self, text):
-        self._buffer.append(text)
+    def buffer_writer(self, *texts):
+        self._buffer.extend(texts)
 
     @property
     def buffer(self):
@@ -351,7 +359,7 @@ class Golfer(NodeVisitor):
     def visit_AugAssign(self, node):
         self.fill()
         self.traverse(node.target)
-        self.write("" + self.binop[node.op.__class__.__name__] + "=")
+        self.write(self.binop[node.op.__class__.__name__] + "=")
         self.traverse(node.value)
 
     def visit_AnnAssign(self, node):
@@ -881,13 +889,8 @@ class Golfer(NodeVisitor):
             self.set_precedence(Precedence.CMP.next(), node.left, *node.comparators)
             self.traverse(node.left)
             for o, e in zip(node.ops, node.comparators):
-                if o.__class__.__name__ in self.cmpops_only_symbol:
-                    d = ""
-                else:
-                    d = " "
-                self.write(d)
-                self.write(self.cmpops[o.__class__.__name__])
-                self.write(d)
+                with self.delimit_if(" ", " ", o.__class__.__name__ not in self.cmpops_only_symbol):
+                    self.write(self.cmpops[o.__class__.__name__])
                 self.traverse(e)
 
     boolops = {"And": "and", "Or": "or"}
